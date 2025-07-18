@@ -36,10 +36,12 @@ from PySide6.QtWidgets import (
     QPushButton, QTableView, QFileDialog, QSplitter, QListWidget,
     QListWidgetItem, QLabel, QAbstractItemView
 )
+from PySide6.QtGui import QAction, QKeySequence # <-- NEW: Imports for menu actions
 from PySide6.QtCore import QAbstractTableModel, Qt, QModelIndex, QSettings, QDir
 import polars as pl
 
 PAGE_SIZE = 10000
+MAX_RECENT_FILES = 10
 
 class PolarsTableModel(QAbstractTableModel):
     """A Qt table model to efficiently display a Polars DataFrame."""
@@ -78,12 +80,14 @@ class ParquetViewer(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Parquet Viewer")
-        # Set a default geometry for the very first run
         self.setGeometry(100, 100, 1200, 800)
 
         # Data state
         self.df = None
         self.current_offset = 0
+
+        # --- NEW: Menu Bar ---
+        self.create_menus()
 
         # --- Main Layout ---
         self.central_widget = QWidget()
@@ -125,9 +129,64 @@ class ParquetViewer(QMainWindow):
         self.splitter.addWidget(self.table_view)
         
         self.update_button_state()
-
-        # NEW: Load window/splitter geometry after UI is constructed
         self.load_settings()
+
+    def create_menus(self):
+        """Creates the main application menu bar."""
+        file_menu = self.menuBar().addMenu("&File")
+
+        open_action = QAction("&Open...", self)
+        open_action.setShortcut(QKeySequence.Open)
+        open_action.triggered.connect(self.open_file)
+        file_menu.addAction(open_action)
+        
+        file_menu.addSeparator()
+
+        self.recent_files_menu = file_menu.addMenu("&Recent Files")
+        self.update_recent_files_menu()
+
+    def update_recent_files_menu(self):
+        """Clears and repopulates the 'Recent Files' submenu."""
+        settings = QSettings()
+        recent_files = settings.value("recentFiles", [], type=list)
+        
+        self.recent_files_menu.clear()
+        
+        if not recent_files:
+            no_recent_action = QAction("No Recent Files", self)
+            no_recent_action.setEnabled(False)
+            self.recent_files_menu.addAction(no_recent_action)
+            return
+
+        for file_path in recent_files:
+            action = QAction(file_path, self)
+            # Use a lambda to pass the specific file path to the slot
+            action.triggered.connect(lambda checked=False, path=file_path: self.load_parquet_data(path))
+            self.recent_files_menu.addAction(action)
+
+        self.recent_files_menu.addSeparator()
+        clear_action = QAction("Clear List", self)
+        clear_action.triggered.connect(self.clear_recent_files)
+        self.recent_files_menu.addAction(clear_action)
+
+    def clear_recent_files(self):
+        """Clears the recent files list from settings."""
+        settings = QSettings()
+        settings.setValue("recentFiles", [])
+        self.update_recent_files_menu()
+
+    def add_to_recent_files(self, file_path):
+        """Adds a file path to the top of the recent files list."""
+        settings = QSettings()
+        recent_files = settings.value("recentFiles", [], type=list)
+
+        if file_path in recent_files:
+            recent_files.remove(file_path)
+        
+        recent_files.insert(0, file_path)
+        del recent_files[MAX_RECENT_FILES:]
+        
+        settings.setValue("recentFiles", recent_files)
 
     def load_settings(self):
         """Loads window and splitter geometry from QSettings."""
@@ -140,12 +199,10 @@ class ParquetViewer(QMainWindow):
         if splitter_state:
             self.splitter.restoreState(splitter_state)
         else:
-            # Provide a default splitter size for the first run
             self.splitter.setSizes([200, 1000])
 
     def closeEvent(self, event):
         """Saves window and splitter geometry to QSettings on close."""
-        # NEW: This method is called automatically when the window is closed.
         settings = QSettings()
         settings.setValue("geometry", self.saveGeometry())
         settings.setValue("splitterState", self.splitter.saveState())
@@ -166,6 +223,7 @@ class ParquetViewer(QMainWindow):
             self.load_parquet_data(file_path)
 
     def load_parquet_data(self, file_path):
+        """Loads data from a file, updates history, and refreshes the UI."""
         try:
             self.df = pl.read_parquet(file_path)
             self.current_offset = 0
@@ -173,8 +231,11 @@ class ParquetViewer(QMainWindow):
             self.column_list.clear()
             for col_name in self.df.columns:
                 self.column_list.addItem(QListWidgetItem(col_name))
-            
+
+            self.add_to_recent_files(file_path)
+            self.update_recent_files_menu()
             self.update_table_view()
+
         except Exception as e:
             self.status_label.setText(f"Error: {e}")
             self.df = None
