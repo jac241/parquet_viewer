@@ -5,52 +5,61 @@ class ParquetViewer
   include Glimmer
 
   PAGE_SIZE = 500
+  # --- CONFIGURATION ---
+  # Change this value to make the left-side column list wider or narrower.
+  # This is the best alternative to a draggable splitter in the libui toolkit.
+  COLUMN_LIST_WIDTH = 450
 
   def initialize
     @df = nil
-    @headers = []
+    
+    # State management
+    @original_headers = []
+    @display_headers = []
     @total_rows = 0
     @current_offset = 0
 
-    # --- CHANGE 1: Add a variable to hold the table proxy ---
-    @table_proxy = nil
-    
+    # UI elements
+    @main_table_container = nil
+    @main_table_proxy = nil
+    @column_list_proxy = nil
     @status_label = nil
     @prev_button = nil
     @next_button = nil
   end
 
   def launch
-    window('Parquet Viewer', 800, 600) {
+    window('Parquet Viewer', 1000, 700) {
       margined true
-
-      vertical_box {
-        horizontal_box {
+      horizontal_box {
+        # --- Left panel: Column List ---
+        vertical_box {
           stretchy false
-
-          button('Open Parquet File') {
-            on_clicked do
-              file = open_file
-              load_parquet_data(file) if file && File.extname(file).downcase == '.parquet'
+          label('Columns') { stretchy false }
+          
+          @column_list_proxy = table {
+            text_column('Columns', width: COLUMN_LIST_WIDTH)
+            editable false
+            
+            on_selection_changed do
+              selection_index = @column_list_proxy.selection
+              handle_column_selection(selection_index)
             end
           }
-
-          @prev_button = button('Previous') {
-            enabled false
-            on_clicked { go_previous }
-          }
-
-          @next_button = button('Next') {
-            enabled false
-            on_clicked { go_next }
+        }
+        
+        # --- Right panel: Controls and Main Table ---
+        vertical_box {
+          stretchy true
+          horizontal_box {
+            stretchy false
+            button('Open Parquet File') { on_clicked { open_and_load_file } }
+            @prev_button = button('Previous') { enabled false; on_clicked { go_previous } }
+            @next_button = button('Next') { enabled false; on_clicked { go_next } }
+            @status_label = label('No file loaded.') { stretchy true }
           }
           
-          @status_label = label('No file loaded.') { stretchy true }
-        }
-
-        # This container will hold our table. It starts empty.
-        @table_container = vertical_box {
-          stretchy true
+          @main_table_container = vertical_box { stretchy true }
         }
       }
     }.show
@@ -58,83 +67,88 @@ class ParquetViewer
 
   private
 
-  # Loads the file, creates the table structure ONCE, and displays the first page.
-  def load_parquet_data(file_path)
+  def open_and_load_file
+    file = open_file
+    return unless file && File.extname(file).downcase == '.parquet'
+    
     begin
-      @df = Polars.read_parquet(file_path)
-      @headers = @df.columns
+      @df = Polars.read_parquet(file)
+      @original_headers = @df.columns
+      @display_headers  = @original_headers.dup
       @total_rows = @df.height
       @current_offset = 0
+
+      @column_list_proxy.cell_rows = @original_headers.map { |h| [h] }
       
-      # --- CHANGE 2: Create the table structure just one time ---
-      # Clear any previous table before creating a new one.
-      @table_container.content {
-        # Store the proxy for the table widget itself
-        @table_proxy = table {
-          stretchy true
-          editable false
-          
-          # The columns are now defined only once when a new file is loaded.
-          @headers.each { |header| text_column(header) }
-        }
-      }
-      
-      # Now, populate the newly created table with the first page of data.
-      update_table_view
+      redraw_main_table_structure
+      update_table_view_data
       
     rescue => e
       msg_box_error("Error Reading File", "An error occurred: #{e.message}")
-      @df = nil # Clear dataframe on error
+      @df = nil
     end
   end
 
-  # This method now ONLY updates the data in the existing table.
-  def update_table_view
-    return unless @df && @table_proxy # Don't do anything if no file is loaded
-
-    # 1. Slice the DataFrame.
-    page_df = @df.slice(@current_offset, PAGE_SIZE)
-
-    # 2. Convert *only the slice* to Ruby arrays.
-    page_data = page_df.to_a.map do |row_hash|
-      row_hash.values_at(*@headers)
-    end
-
-    # --- CHANGE 3: The Fix! Use data binding to update the rows ---
-    # This simply replaces the data in the existing table instead of
-    # creating a new one.
-    @table_proxy.cell_rows = page_data
+  def handle_column_selection(selection_index)
+    return if @df.nil? || selection_index.nil? || selection_index < 0
+    selected_column = @original_headers[selection_index]
     
-    # 4. Update the status label and button states.
+    @display_headers = [selected_column] + (@original_headers - [selected_column])
+    
+    redraw_main_table_structure
+    update_table_view_data
+  end
+
+  def redraw_main_table_structure
+    return if @display_headers.empty?
+    @main_table_container.children.to_a.each(&:destroy)
+    @main_table_container.content {
+      @main_table_proxy = table {
+        stretchy true
+        editable false
+        @display_headers.each { |header| text_column(header) }
+      }
+    }
+  end
+
+  def update_table_view_data
+    return unless @df && @main_table_proxy
+    page_df = @df.slice(@current_offset, PAGE_SIZE)
+    page_data = page_df.to_a.map { |row_hash| row_hash.values_at(*@display_headers) }
+    @main_table_proxy.cell_rows = page_data
     update_status
   end
 
   def update_status
     return unless @df && @total_rows > 0
-
     start_row = @current_offset + 1
     end_row = [@current_offset + PAGE_SIZE, @total_rows].min
     @status_label.text = "Showing Rows: #{start_row} - #{end_row} of #{@total_rows}"
-    
     @prev_button.enabled = (@current_offset > 0)
     @next_button.enabled = (@current_offset + PAGE_SIZE < @total_rows)
   end
 
   def go_next
-    return unless @df
-    if @current_offset + PAGE_SIZE < @total_rows
-      @current_offset += PAGE_SIZE
-      update_table_view
+    return unless @df && (@current_offset + PAGE_SIZE < @total_rows)
+    # Only redraw the table structure if the columns have been reordered.
+    if @display_headers != @original_headers
+      @display_headers = @original_headers.dup
+      redraw_main_table_structure
     end
+    @current_offset += PAGE_SIZE
+    update_table_view_data
   end
 
   def go_previous
-    return unless @df
-    if @current_offset > 0
-      @current_offset -= PAGE_SIZE
-      @current_offset = [@current_offset, 0].max
-      update_table_view
+    return unless @df && @current_offset > 0
+    # Revert to original column order if needed.
+    if @display_headers != @original_headers
+      @display_headers = @original_headers.dup
+      redraw_main_table_structure
     end
+    @current_offset -= PAGE_SIZE
+    @current_offset = [@current_offset, 0].max
+    update_table_view_data
   end
 end
 
