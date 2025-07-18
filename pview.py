@@ -3,7 +3,7 @@
 # --- Part 1: Dependency Checker ---
 import sys
 import signal
-import os  # <-- Added for path manipulation
+import os
 import subprocess
 import importlib.util
 
@@ -61,7 +61,6 @@ class PolarsTableModel(QAbstractTableModel):
         row, col = index.row(), index.column()
         value = self._data[row, col]
         
-        # NEW: Return an empty string for None/null values
         if value is None:
             return ""
         return str(value)
@@ -79,6 +78,7 @@ class ParquetViewer(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Parquet Viewer")
+        # Set a default geometry for the very first run
         self.setGeometry(100, 100, 1200, 800)
 
         # Data state
@@ -123,14 +123,36 @@ class ParquetViewer(QMainWindow):
         self.table_view.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table_view.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.splitter.addWidget(self.table_view)
-
-        self.splitter.setSizes([200, 1000])
         
         self.update_button_state()
 
+        # NEW: Load window/splitter geometry after UI is constructed
+        self.load_settings()
+
+    def load_settings(self):
+        """Loads window and splitter geometry from QSettings."""
+        settings = QSettings()
+        geometry = settings.value("geometry")
+        if geometry:
+            self.restoreGeometry(geometry)
+        
+        splitter_state = settings.value("splitterState")
+        if splitter_state:
+            self.splitter.restoreState(splitter_state)
+        else:
+            # Provide a default splitter size for the first run
+            self.splitter.setSizes([200, 1000])
+
+    def closeEvent(self, event):
+        """Saves window and splitter geometry to QSettings on close."""
+        # NEW: This method is called automatically when the window is closed.
+        settings = QSettings()
+        settings.setValue("geometry", self.saveGeometry())
+        settings.setValue("splitterState", self.splitter.saveState())
+        super().closeEvent(event)
+
     def open_file(self):
         """Opens a file dialog, remembering the last used directory."""
-        # NEW: Use QSettings to get the last directory
         settings = QSettings()
         last_dir = settings.value("last_directory", QDir.homePath())
 
@@ -139,7 +161,6 @@ class ParquetViewer(QMainWindow):
         )
         
         if file_path:
-            # NEW: Save the new directory for next time
             directory = os.path.dirname(file_path)
             settings.setValue("last_directory", directory)
             self.load_parquet_data(file_path)
@@ -209,7 +230,6 @@ if __name__ == "__main__":
     
     app = QApplication(sys.argv)
     
-    # NEW: Set organization and application name for QSettings
     app.setOrganizationName("io.github.jac241")
     app.setApplicationName("ParquetViewer")
     
