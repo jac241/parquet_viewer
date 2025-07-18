@@ -3,6 +3,7 @@
 # --- Part 1: Dependency Checker ---
 import sys
 import signal
+import os  # <-- Added for path manipulation
 import subprocess
 import importlib.util
 
@@ -35,7 +36,7 @@ from PySide6.QtWidgets import (
     QPushButton, QTableView, QFileDialog, QSplitter, QListWidget,
     QListWidgetItem, QLabel, QAbstractItemView
 )
-from PySide6.QtCore import QAbstractTableModel, Qt, QModelIndex
+from PySide6.QtCore import QAbstractTableModel, Qt, QModelIndex, QSettings, QDir
 import polars as pl
 
 PAGE_SIZE = 10000
@@ -56,8 +57,14 @@ class PolarsTableModel(QAbstractTableModel):
     def data(self, index, role=Qt.DisplayRole):
         if not index.isValid() or role != Qt.DisplayRole:
             return None
+        
         row, col = index.row(), index.column()
-        return str(self._data[row, col])
+        value = self._data[row, col]
+        
+        # NEW: Return an empty string for None/null values
+        if value is None:
+            return ""
+        return str(value)
 
     def headerData(self, section, orientation, role=Qt.DisplayRole):
         if role == Qt.DisplayRole:
@@ -122,10 +129,19 @@ class ParquetViewer(QMainWindow):
         self.update_button_state()
 
     def open_file(self):
+        """Opens a file dialog, remembering the last used directory."""
+        # NEW: Use QSettings to get the last directory
+        settings = QSettings()
+        last_dir = settings.value("last_directory", QDir.homePath())
+
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "Open Parquet File", "", "Parquet Files (*.parquet *.pq)"
+            self, "Open Parquet File", last_dir, "Parquet Files (*.parquet *.pq)"
         )
+        
         if file_path:
+            # NEW: Save the new directory for next time
+            directory = os.path.dirname(file_path)
+            settings.setValue("last_directory", directory)
             self.load_parquet_data(file_path)
 
     def load_parquet_data(self, file_path):
@@ -165,14 +181,11 @@ class ParquetViewer(QMainWindow):
         self.update_table_view()
 
     def go_next(self):
-        """Navigates to the next page."""
-        # THE FIX: Check for the existence of the DataFrame with `is not None`.
         if self.df is not None and (self.current_offset + PAGE_SIZE < self.df.height):
             self.current_offset += PAGE_SIZE
             self.update_table_view()
 
     def scroll_to_column(self, item: QListWidgetItem):
-        """Scrolls the table view horizontally and selects the column."""
         if self.df is None:
             return
             
@@ -185,7 +198,6 @@ class ParquetViewer(QMainWindow):
             pass
 
     def update_button_state(self):
-        """Enables or disables navigation buttons based on current state."""
         has_data = self.df is not None
         self.btn_prev.setEnabled(has_data and self.current_offset > 0)
         self.btn_next.setEnabled(
@@ -196,6 +208,11 @@ if __name__ == "__main__":
     signal.signal(signal.SIGINT, signal.SIG_DFL)
     
     app = QApplication(sys.argv)
+    
+    # NEW: Set organization and application name for QSettings
+    app.setOrganizationName("io.github.jac241")
+    app.setApplicationName("ParquetViewer")
+    
     viewer = ParquetViewer()
     viewer.show()
     sys.exit(app.exec())
