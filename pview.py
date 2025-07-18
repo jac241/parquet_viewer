@@ -222,6 +222,21 @@ class ParquetViewer(QMainWindow):
         self.recent_files_menu = file_menu.addMenu("&Recent Files")
         self.update_recent_files_menu()
 
+        # --- NEW: View Menu ---
+        view_menu = self.menuBar().addMenu("&View")
+        
+        # Previous Page Action
+        self.prev_action = QAction("&Previous Page", self)
+        self.prev_action.setShortcut(QKeySequence("Ctrl+P"))
+        self.prev_action.triggered.connect(self.go_previous)
+        view_menu.addAction(self.prev_action)
+        
+        # Next Page Action
+        self.next_action = QAction("&Next Page", self)
+        self.next_action.setShortcut(QKeySequence("Ctrl+N"))
+        self.next_action.triggered.connect(self.go_next)
+        view_menu.addAction(self.next_action)
+
     def update_recent_files_menu(self):
         """Clears and repopulates the 'Recent Files' submenu."""
         settings = QSettings()
@@ -469,11 +484,17 @@ class ParquetViewer(QMainWindow):
             pass
 
     def update_button_state(self):
+        """Enables or disables navigation buttons and menu actions based on current state."""
         has_data = self.df is not None
-        self.btn_prev.setEnabled(has_data and self.current_offset > 0)
-        self.btn_next.setEnabled(
-            has_data and (self.current_offset + PAGE_SIZE < self.df.height)
-        )
+        can_go_prev = has_data and self.current_offset > 0
+        can_go_next = has_data and (self.current_offset + PAGE_SIZE < self.df.height)
+        
+        self.btn_prev.setEnabled(can_go_prev)
+        self.prev_action.setEnabled(can_go_prev) # Sync menu item
+        
+        self.btn_next.setEnabled(can_go_next)
+        self.next_action.setEnabled(can_go_next) # Sync menu item
+
 
 if __name__ == "__main__":
     signal.signal(signal.SIGINT, signal.SIG_DFL)
