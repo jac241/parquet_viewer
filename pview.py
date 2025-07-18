@@ -1,4 +1,4 @@
-# Single-file Parquet Viewer using Python, Polars, and PySide6
+# pview.py (Main Application)
 
 # --- Part 1: Dependency Checker ---
 import sys
@@ -34,10 +34,12 @@ check_and_install_dependencies()
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QTableView, QFileDialog, QSplitter, QListWidget,
-    QListWidgetItem, QLabel, QAbstractItemView
+    QListWidgetItem, QLabel, QAbstractItemView, QMessageBox
 )
-from PySide6.QtGui import QAction, QKeySequence # <-- NEW: Imports for menu actions
-from PySide6.QtCore import QAbstractTableModel, Qt, QModelIndex, QSettings, QDir
+from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtCore import (
+    QAbstractTableModel, Qt, QModelIndex, QSettings, QDir, QFileSystemWatcher
+)
 import polars as pl
 
 PAGE_SIZE = 10000
@@ -82,19 +84,27 @@ class ParquetViewer(QMainWindow):
         self.setWindowTitle("Parquet Viewer")
         self.setGeometry(100, 100, 1200, 800)
 
-        # Data state
+        # Data and state
         self.df = None
         self.current_offset = 0
+        self.current_file_path = None
+        self.current_file_mtime = None
 
-        # --- NEW: Menu Bar ---
+        # NEW: File System Watcher for auto-reloading
+        self.file_watcher = QFileSystemWatcher(self)
+        self.file_watcher.fileChanged.connect(self.handle_file_change)
+
         self.create_menus()
+        self.setup_ui()
+        self.load_settings()
 
-        # --- Main Layout ---
+    def setup_ui(self):
+        """Constructs the main UI layout and widgets."""
         self.central_widget = QWidget()
         self.main_layout = QVBoxLayout(self.central_widget)
         self.setCentralWidget(self.central_widget)
 
-        # --- Top Controls ---
+        # Top Controls
         controls_layout = QHBoxLayout()
         self.btn_open = QPushButton("Open Parquet File")
         self.btn_prev = QPushButton("Previous")
@@ -112,16 +122,14 @@ class ParquetViewer(QMainWindow):
         controls_layout.addWidget(self.status_label)
         self.main_layout.addLayout(controls_layout)
 
-        # --- Splitter for Column List and Table View ---
+        # Main Content Splitter
         self.splitter = QSplitter(Qt.Horizontal)
         self.main_layout.addWidget(self.splitter, 1)
 
-        # Left side: Column List
         self.column_list = QListWidget()
         self.column_list.itemClicked.connect(self.scroll_to_column)
         self.splitter.addWidget(self.column_list)
 
-        # Right side: Table View
         self.table_view = QTableView()
         self.table_view.setAlternatingRowColors(True)
         self.table_view.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -129,7 +137,6 @@ class ParquetViewer(QMainWindow):
         self.splitter.addWidget(self.table_view)
         
         self.update_button_state()
-        self.load_settings()
 
     def create_menus(self):
         """Creates the main application menu bar."""
@@ -160,7 +167,6 @@ class ParquetViewer(QMainWindow):
 
         for file_path in recent_files:
             action = QAction(file_path, self)
-            # Use a lambda to pass the specific file path to the slot
             action.triggered.connect(lambda checked=False, path=file_path: self.load_parquet_data(path))
             self.recent_files_menu.addAction(action)
 
@@ -208,6 +214,39 @@ class ParquetViewer(QMainWindow):
         settings.setValue("splitterState", self.splitter.saveState())
         super().closeEvent(event)
 
+    def handle_file_change(self, path):
+        """Slot for the QFileSystemWatcher's fileChanged signal."""
+        if path != self.current_file_path or self.current_file_path is None:
+            return
+
+        try:
+            # Check modification time to avoid false positives from some OS/editors
+            new_mtime = os.path.getmtime(path)
+            if new_mtime == self.current_file_mtime:
+                return
+
+            # Prompt the user to reload
+            reply = QMessageBox.question(
+                self,
+                "File Modified",
+                f"The file '{os.path.basename(path)}' has been modified.\n\n"
+                "Do you want to reload it?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+
+            if reply == QMessageBox.Yes:
+                self.load_parquet_data(path)
+            else:
+                # If they say no, update the mtime anyway so we don't ask again
+                # for this specific change.
+                self.current_file_mtime = new_mtime
+
+        except FileNotFoundError:
+            # The file might have been deleted, so we stop watching it.
+            self.file_watcher.removePath(path)
+            self.status_label.setText(f"File not found: {os.path.basename(path)}")
+
     def open_file(self):
         """Opens a file dialog, remembering the last used directory."""
         settings = QSettings()
@@ -224,9 +263,18 @@ class ParquetViewer(QMainWindow):
 
     def load_parquet_data(self, file_path):
         """Loads data from a file, updates history, and refreshes the UI."""
+        # Remove the old path from the watcher before loading the new one
+        if self.current_file_path and self.current_file_path in self.file_watcher.files():
+            self.file_watcher.removePath(self.current_file_path)
+
         try:
             self.df = pl.read_parquet(file_path)
             self.current_offset = 0
+            self.current_file_path = file_path
+            self.current_file_mtime = os.path.getmtime(file_path)
+
+            # Add the new path to be watched
+            self.file_watcher.addPath(self.current_file_path)
             
             self.column_list.clear()
             for col_name in self.df.columns:
@@ -237,7 +285,7 @@ class ParquetViewer(QMainWindow):
             self.update_table_view()
 
         except Exception as e:
-            self.status_label.setText(f"Error: {e}")
+            self.status_label.setText(f"Error loading {os.path.basename(file_path)}: {e}")
             self.df = None
         
         self.update_button_state()
@@ -245,6 +293,8 @@ class ParquetViewer(QMainWindow):
     def update_table_view(self):
         if self.df is None:
             self.status_label.setText("No file loaded.")
+            # Clear the table view if no dataframe is loaded
+            self.table_view.setModel(None)
             return
 
         page_df = self.df.slice(self.current_offset, PAGE_SIZE)
